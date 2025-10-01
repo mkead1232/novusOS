@@ -15,7 +15,7 @@ fi
 
 # Assemble kernel (assembly, not C)
 echo "Assembling kernel..."
-nasm -f bin keyboard.asm -o kernel.bin
+nasm -f bin kernel.asm -o kernel.bin
 if [ $? -ne 0 ]; then
     echo "Kernel assembly failed!"
     exit 1

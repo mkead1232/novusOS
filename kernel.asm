@@ -22,7 +22,7 @@ kernel_start:
     jmp kernel_start
 ; Create an info display function
 display_info:
-    mov edi, 0xB8000        ; Top of screen
+    mov edi, 0xB8DC0      ; Bottom
     mov esi, os_name
     call print_string_at
     ; TODO: Display more info
@@ -95,4 +95,4 @@ scancode_to_ascii:
     times 0x39-0x36 db 0
     db ' '  ; Space (0x39)
     times 256-0x3A db 0  ; Fill rest with zeros
-os_name db 'novusOS v0.1', 0
+os_name db 'This kernel is under the MIT license.', 0
