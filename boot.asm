@@ -85,42 +85,68 @@ gdt_desc:
 
 [BITS 32]
 clear_pipe:
-    mov ax, 10h
+    ; Setup data segments and stack
+    mov ax, 0x10
     mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
     mov ss, ax
     mov esp, 0x90000
-    
-    ; Clear screen
+
+    ; Clear VGA text buffer (80x25)
     mov edi, 0xB8000
-    mov ecx, 2000
+    mov ecx, 80*25
     mov ax, 0x0720
     rep stosw
-    
-    ; Rainbow text
-    mov edi, 0xB8000
-    mov byte [edi], 'n'
-    mov byte [edi+1], 0x04
-    add edi, 2
-    mov byte [edi], 'o'
-    mov byte [edi+1], 0x0E
-    add edi, 2
-    mov byte [edi], 'v'
-    mov byte [edi+1], 0x0A
-    add edi, 2
-    mov byte [edi], 'u'
-    mov byte [edi+1], 0x0B
-    add edi, 2
-    mov byte [edi], 's'
-    mov byte [edi+1], 0x0D
-    add edi, 2
-    mov byte [edi], 'O'
-    mov byte [edi+1], 0x0F
-    add edi, 2
-    mov byte [edi], 'S'
-    mov byte [edi+1], 0x0F
-    
-    ; Jump to kernel
-    jmp 0x1000
+
+    ; Example: print "NovusOS Bootloader"
+    mov esi, boot_msg32         ; ESI = string pointer (linear)
+    mov edi, 0xB8000            ; EDI = VGA text memory
+    call print_string32_rainbow
+
+    jmp 0x1000                  ; Jump to kernel
+
+; --------------------------------------------------------------------
+; print_string32_rainbow
+; IN:  ESI -> zero-terminated string
+;      EDI -> VGA text buffer position
+; OUT: prints characters with rainbow colors (forces 7-bit ASCII)
+; --------------------------------------------------------------------
+print_string32_rainbow:
+    pushad
+    mov ebx, rainbow_colors
+    xor ecx, ecx                ; color index = 0
+
+.loop:
+    mov al, [esi]               ; load byte from string
+    test al, al
+    je .done
+
+    and al, 0x7F                ; <-- FIX: ensure ASCII (strip high bit)
+    mov [edi], al               ; write char to VGA
+    mov dl, [ebx + ecx]         ; pick color attribute
+    mov [edi+1], dl             ; write attribute
+
+    add edi, 2                  ; next cell
+    inc esi
+    inc ecx
+    cmp ecx, rainbow_count
+    jl .no_wrap
+    xor ecx, ecx                ; wrap colors
+.no_wrap:
+    jmp .loop
+
+.done:
+    popad
+    ret
+
+; --------------------------------------------------------------------
+boot_msg32 db 'novusOS', 0
+
+; Rainbow attributes (cycle through them)
+rainbow_colors db 0x04, 0x0E, 0x0A, 0x0B, 0x0D
+rainbow_count  equ ($ - rainbow_colors)
 
 times 510-($-$$) db 0
 dw 0xAA55
