@@ -1,0 +1,42 @@
++ echo 'Building NovusOS...'
+Building NovusOS...
++ rm -f kernel_entry.o kernel.o boot.bin disk.img
++ echo 'Assembling bootloader...'
+Assembling bootloader...
++ nasm -f bin boot.asm -o boot.bin
++ '[' 0 -ne 0 ']'
++ echo 'Compiling kernel entry...'
+Compiling kernel entry...
++ gcc -m32 -c kernel_entry.s -o kernel_entry.o
+kernel_entry.s: Assembler messages:
+kernel_entry.s: Warning: end of file not at end of a line; newline inserted
++ '[' 0 -ne 0 ']'
++ echo 'Compiling kernel...'
+Compiling kernel...
++ gcc -m32 -ffreestanding -nostdlib -fno-pic -fno-pie -c kernel.c -o kernel.o
++ '[' 0 -ne 0 ']'
++ cat
++ echo 'Linking kernel...'
+Linking kernel...
++ ld -m elf_i386 -T kernel.ld kernel_entry.o kernel.o -o kernel.elf
++ objcopy -O binary kernel.elf kernel.bin
+objcopy: kernel.elf: file format not recognized
++ rm kernel.elf
++ echo 'Creating disk image...'
+Creating disk image...
++ dd if=/dev/zero of=disk.img bs=512 count=2880
++ dd if=boot.bin of=disk.img bs=512 count=1 conv=notrunc
++ dd if=kernel.bin of=disk.img bs=512 seek=1 conv=notrunc
++ echo 'Build complete!'
+Build complete!
++ echo 'Boot with: qemu-system-x86_64 -fda disk.img'
+Boot with: qemu-system-x86_64 -fda disk.img
+++ ls -lh kernel.bin
+++ awk '{print $5}'
+ls: cannot access 'kernel.bin': No such file or directory
++ echo 'Kernel size: '
+Kernel size: 
++ qemu-system-x86_64 -fda disk.img
+WARNING: Image format was not specified for 'disk.img' and probing guessed raw.
+         Automatically detecting the format is dangerous for raw images, write operations on block 0 will be restricted.
+         Specify the 'raw' format explicitly to remove the restrictions.
