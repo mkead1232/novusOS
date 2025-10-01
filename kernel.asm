@@ -95,4 +95,7 @@ scancode_to_ascii:
     times 0x39-0x36 db 0
     db ' '  ; Space (0x39)
     times 256-0x3A db 0  ; Fill rest with zeros
+<<<<<<< HEAD
 os_name db 'This kernel is under the MIT license.', 0
+=======
+>>>>>>> 0eb0532b87ebfaa8e98802b7bf2a85383971280b
