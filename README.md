@@ -6,7 +6,7 @@ an ACTUAL kernel and bootloader (technically an os) i wrote
 
 
 to run:
-``yay -S i686-gcc-bin``
+``yay -S nasm``
 ``chmod +x build.sh``
 
 ``./build.sh``
