@@ -1,6 +1,8 @@
 # novusOS
 <img width="400" height="300" alt="novus" src="https://github.com/user-attachments/assets/f96776b6-ca9f-4997-bf7c-21f38dc7b2c6" />
- an ACTUAL kernel and bootloader (technically an os) i wrote
+
+
+an ACTUAL kernel and bootloader (technically an os) i wrote
 
 
 to run:
