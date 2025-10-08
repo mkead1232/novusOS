@@ -1,14 +1,64 @@
-# novusOS
-<img width="400" height="300" alt="novus" src="https://github.com/user-attachments/assets/f96776b6-ca9f-4997-bf7c-21f38dc7b2c6" />
+# NovusOS
 
+A simple x86 operating system written in Assembly, featuring a basic command line interface.
 
-an ACTUAL kernel and bootloader (technically an os) i wrote
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
+## Features
 
-to run:
-``yay -S nasm``
-``chmod +x build.sh``
+- Protected mode operation
+- Command-line interface with prompt
+- Basic keyboard input handling with shift key support
+- VGA text mode display
+- System information display
+- Several built-in commands
 
-``./build.sh``
+## Commands
 
-you may also need qemu but that's only if you don't want to test it on real hardware. other than that, real hardware support hasn't been actually planned for a bit, but it will be added.
+- `help` - Display available commands
+- `clear` - Clear the screen
+- `about` - Show kernel version
+- `specs` - Display system information
+- `echo` - Print text to screen
+- `casc` - Easter egg :)
+
+## Building
+
+Requires:
+- NASM assembler
+- QEMU emulator (for testing)
+
+To build and run:
+```bash
+./build.sh     # Assemble and create disk image
+```
+
+## Running on Real Hardware
+
+1. Write the disk image to a USB drive:
+```bash
+sudo dd if=disk.img of=/dev/sdX bs=512
+```
+(Replace sdX with your USB drive letter, BE CAREFUL with this command!)
+
+2. Boot Configuration:
+   - Disable Secure Boot in BIOS
+   - Enable Legacy Boot/CSM Support
+   - Set boot priority to USB first
+   - Disable Fast Boot
+
+## Technical Details
+
+- Written in x86 Assembly
+- Uses BIOS interrupts for disk I/O
+- Implements PS/2 keyboard support
+- VGA text mode (80x25) display
+- Protected mode operation
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Author
+
+Created by Aden Kirk (mkead1232)
