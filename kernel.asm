@@ -38,6 +38,7 @@ kernel_start:
     
     call display_info
     call show_prompt
+    call update_hardware_cursor  ; Set initial cursor position
     
 main_loop:
     call wait_for_key    ; AL has ASCII character
@@ -63,7 +64,72 @@ main_loop:
     jl .ok
     mov dword [cursor_pos], 0xB81E0  ; Reset to line 3
 .ok:
+    call update_hardware_cursor  ; Update cursor to new position
     jmp main_loop
+
+; Update hardware cursor position based on cursor_pos
+update_hardware_cursor:
+    push eax
+    push ebx
+    push edx
+    
+    ; Calculate cursor position (convert memory address to screen position)
+    mov eax, [cursor_pos]
+    sub eax, 0xB8000     ; Subtract video memory base
+    shr eax, 1           ; Divide by 2 (each char is 2 bytes)
+    
+    ; EAX now contains the cursor position (0-1999 for 80x25)
+    mov ebx, eax         ; Save position
+    
+    ; Set low byte of cursor position
+    mov dx, 0x3D4        ; VGA CRTC index register
+    mov al, 0x0F         ; Cursor Location Low register
+    out dx, al
+    
+    mov dx, 0x3D5        ; VGA CRTC data register
+    mov al, bl           ; Low byte of cursor position
+    out dx, al
+    
+    ; Set high byte of cursor position
+    mov dx, 0x3D4        ; VGA CRTC index register
+    mov al, 0x0E         ; Cursor Location High register
+    out dx, al
+    
+    mov dx, 0x3D5        ; VGA CRTC data register
+    mov al, bh           ; High byte of cursor position
+    out dx, al
+    
+    pop edx
+    pop ebx
+    pop eax
+    ret
+
+; Enable cursor with specific shape (optional - call this in kernel_start if needed)
+enable_cursor:
+    push eax
+    push edx
+    
+    ; Set cursor start line (top of cursor)
+    mov dx, 0x3D4
+    mov al, 0x0A         ; Cursor Start Register
+    out dx, al
+    
+    mov dx, 0x3D5
+    mov al, 0x0E         ; Start at line 14 (for underscore cursor)
+    out dx, al
+    
+    ; Set cursor end line (bottom of cursor)
+    mov dx, 0x3D4
+    mov al, 0x0B         ; Cursor End Register
+    out dx, al
+    
+    mov dx, 0x3D5
+    mov al, 0x0F         ; End at line 15 (for underscore cursor)
+    out dx, al
+    
+    pop edx
+    pop eax
+    ret
 
 ; Create an info display function
 display_info:
@@ -233,51 +299,55 @@ cmd_specs:
     mov esi, cpu_msg
     call print_string_at
     
-    ; Store vendor string
-    push ebx
-    push edx
-    push ecx
+    ; Store and print vendor string (12 chars: 4 from each register)
+    push eax            ; Save EAX
     
-    ; Create temporary buffer for vendor string
-    sub esp, 16         ; Allocate 16 bytes on stack
-    mov edi, esp        ; Point to our buffer
+    ; Print first part (from EBX)
+    mov eax, ebx
+    call print_cpu_chars
     
-    ; Build vendor string
-    pop eax             ; Get ECX (last part)
-    mov [edi+8], eax
-    pop eax             ; Get EDX (middle part)
-    mov [edi+4], eax
-    pop eax             ; Get EBX (first part)
-    mov [edi], eax
-    mov byte [edi+12], 0  ; Null terminate
+    ; Print middle part (from EDX)
+    mov eax, edx
+    call print_cpu_chars
     
-    ; Print the vendor string
-    mov esi, edi        ; Source is our buffer
-    mov edi, [cursor_pos]
-    call print_string_at
-    add esp, 16         ; Clean up our buffer
+    ; Print last part (from ECX)
+    mov eax, ecx
+    call print_cpu_chars
+    
+    pop eax             ; Restore EAX
     call newline
     
-    ; Get RAM size
+    ; Define system info structure address
+    SYSINFO_ADDR equ 0x500
+    
+    ; Verify system info structure
+    mov esi, SYSINFO_ADDR     ; System info structure location
+    mov edi, sysinfo_sig
+    mov ecx, 8                ; Length of signature + null
+    call compare_strings
+    cmp eax, 0
+    jne .no_sysinfo
+    
+    ; Print RAM size
     mov edi, [cursor_pos]
     mov esi, ram_msg
     call print_string_at
     
-    ; Convert AX to decimal string
-    mov ax, 640        ; Default to 640K for QEMU
-    mov cx, 0          ; Digit counter
-    mov bx, 10         ; Divisor
+    ; Convert RAM size to string
+    mov ax, [SYSINFO_ADDR + 7] ; Load RAM size from structure
+    mov cx, 0                  ; Digit counter
+    mov bx, 10                 ; Divisor
 .convert_loop:
-    xor dx, dx         ; Clear for division
+    xor dx, dx              ; Clear for division
     div bx
-    push dx            ; Save remainder
+    push dx                 ; Save remainder
     inc cx
     test ax, ax
     jnz .convert_loop
     
 .print_digits:
     pop ax
-    add al, '0'        ; Convert to ASCII
+    add al, '0'            ; Convert to ASCII
     mov [edi], al
     mov byte [edi+1], 0x07
     add edi, 2
@@ -288,9 +358,35 @@ cmd_specs:
     call print_string_at
     call newline
     
+    ; Print BIOS vendor
+    mov edi, [cursor_pos]
+    mov esi, bios_msg
+    call print_string_at
+    mov esi, SYSINFO_ADDR + 9    ; Point to BIOS vendor in structure
+    call print_string_at
+    call newline
+    
+    ; Print BIOS date
+    mov edi, [cursor_pos]
+    mov esi, bios_date_msg
+    call print_string_at
+    mov esi, SYSINFO_ADDR + 26   ; Point to BIOS date in structure
+    call print_string_at
+    call newline
+    jmp .done
+    
+.no_sysinfo:
+    ; Print error message if system info not found
+    mov edi, [cursor_pos]
+    mov esi, sysinfo_error
+    call print_string_at
+    call newline
+    
+.done:
     mov [cursor_pos], edi
     call clear_input_buffer
     xor al, al
+    call newline
     ret
 
 ; Helper function to print hex string
@@ -388,12 +484,21 @@ shift_release:
 
 handle_backspace:
     mov edi, [cursor_pos]
-    cmp edi, 0xB81E0     
-    jle .backspace_done
+    sub edi, 2              ; Position we'd backspace to
+    
+    ; Calculate column position
+    mov eax, edi
+    sub eax, 0xB8000       ; Get offset from start of video memory
+    mov ecx, 160           ; Bytes per line (80 columns * 2 bytes per char)
+    xor edx, edx
+    div ecx                ; EDX now contains byte offset within line
+    
+    ; Don't backspace if we're at prompt position (first 2 bytes of line)
+    cmp edx, 2             ; Smiley + space (4 bytes total, but we're checking position after backspace)
+    jle .backspace_done    ; If at or before prompt, don't backspace
     
     ; Safe to backspace
-    sub dword [cursor_pos], 2    ; Move back one character
-    mov edi, [cursor_pos]        ; Get new position
+    mov dword [cursor_pos], edi  ; Update cursor position
     mov byte [edi], ' '          ; Write space
     mov byte [edi+1], 0x07       ; Write color
     
@@ -403,8 +508,10 @@ handle_backspace:
     jz .backspace_done
     dec dword [buffer_index]
     
+    call update_hardware_cursor  ; Update cursor after backspace
+    
 .backspace_done:
-    xor al, al          ; Return 0 to indicate key was processed
+    xor al, al              ; Return 0 to indicate key was processed
     ret
 
 newline:
@@ -428,6 +535,7 @@ newline:
 .no_wrap:
     mov [cursor_pos], eax
     call show_prompt
+    call update_hardware_cursor  ; Update cursor after newline
     ret
 
 clear_screen:
@@ -444,6 +552,7 @@ clear_screen:
     call display_info   ; Redraw info
     mov dword [cursor_pos], 0xB81E0  ; Reset to line 3
     call show_prompt
+    call update_hardware_cursor  ; Update cursor after clear
     ret
 
 clear_input_buffer:
@@ -533,6 +642,21 @@ wait_kbd_read:
     in al, 0x64
     test al, 1
     jz wait_kbd_read
+    ret
+; Function to print 4 characters from EAX (for CPU vendor string)
+print_cpu_chars:
+    push ecx
+    push edi
+    mov ecx, 4          ; Process 4 characters
+.loop:
+    mov edi, [cursor_pos]
+    mov [edi], al       ; Write character
+    mov byte [edi+1], 0x07  ; Gray color
+    add dword [cursor_pos], 2
+    ror eax, 8         ; Get next character
+    loop .loop
+    pop edi
+    pop ecx
     ret
 
 shift_pressed db 0     ; Track shift key state
@@ -627,10 +751,11 @@ rainbow_count  equ ($ - rainbow_colors)
 show_prompt:
     push edi
     mov edi, [cursor_pos]
-    mov byte [edi], 0x01     ; Smiley face
-    mov byte [edi+1], 0x07   ; Gray color
-    mov byte [edi+2], ' '    ; Space after smiley
-    mov byte [edi+3], 0x07   ; Gray color
+    mov byte [edi], '>'
+    mov byte [edi+1], 0x02   ; green color
+    mov byte [edi+2], ':'    ; Space after smiley
+    mov byte [edi+3], 0x07
     add dword [cursor_pos], 4 ; Move cursor past prompt
     pop edi
     ret
+dw 0xAA55
