@@ -1,10 +1,41 @@
 [bits 32]
 [org 0x1000]
 
-cursor_pos dd 0xB81E0    ; Track current write position
+cursor_pos dd 0xB81E0
 input_buffer:
     times 64 db 0
 buffer_index dd 0
+
+; Filesystem structures
+FS_BASE_SECTOR equ 1
+FS_FAT_SECTOR equ 2
+FS_FAT_SECTORS equ 32
+FS_DIR_SECTOR equ 34
+FS_DIR_SECTORS equ 32
+FS_DATA_SECTOR equ 66
+FS_MAX_FILES equ 256
+FS_BLOCK_SIZE equ 512
+
+FS_BUFFER equ 0x10000
+FAT_BUFFER equ 0x20000
+DIR_BUFFER equ 0x30000
+
+struc DirEntry
+    .name: resb 16
+    .size: resd 1
+    .firstBlock: resw 1
+    .flags: resb 1
+    .reserved: resb 9
+endstruc
+
+struc Superblock
+    .magic: resd 1
+    .totalBlocks: resd 1
+    .freeBlocks: resd 1
+    .reserved: resb 500
+endstruc
+
+fs_initialized db 0
 
 compare_strings:
     .loop:
@@ -17,171 +48,104 @@ compare_strings:
         inc esi
         inc edi
         jmp .loop
-
     .equal:
         xor eax, eax
         ret
-
     .not_equal:
         mov eax, 1
         ret
     
 kernel_start:
-    ; Clear registers and buffer
     xor eax, eax
     xor ebx, ebx
     mov dword [buffer_index], 0
-    
-    ; Clear any pending keyboard data
-    in al, 0x60          ; Read and discard any pending data
-    in al, 0x60          ; Read twice to ensure buffer is clear
-    
+    in al, 0x60
+    in al, 0x60
     call display_info
     call show_prompt
-    call update_hardware_cursor  ; Set initial cursor position
+    call update_hardware_cursor
     
 main_loop:
-    call wait_for_key    ; AL has ASCII character
-    
-    ; Check if it's a special key that was already handled
+    call wait_for_key
     test al, al
-    jz main_loop         ; If AL is 0, key was already processed
-    
-    ; Write character to screen at cursor position
+    jz main_loop
     mov edi, [cursor_pos]
-    mov [edi], al        ; Write character
-    mov byte [edi+1], 0x07  ; Write color
-    
-    ; Store in buffer
+    mov [edi], al
+    mov byte [edi+1], 0x07
     mov ebx, [buffer_index]
     mov [input_buffer + ebx], al
     inc dword [buffer_index]
-
-    ; Move cursor forward
     add dword [cursor_pos], 2
     mov edi, [cursor_pos]
-    cmp edi, 0xB8FA0           ; End of screen (line 25)
+    cmp edi, 0xB8FA0
     jl .ok
-    mov dword [cursor_pos], 0xB81E0  ; Reset to line 3
+    mov dword [cursor_pos], 0xB81E0
 .ok:
-    call update_hardware_cursor  ; Update cursor to new position
+    call update_hardware_cursor
     jmp main_loop
 
-; Update hardware cursor position based on cursor_pos
 update_hardware_cursor:
     push eax
     push ebx
     push edx
-    
-    ; Calculate cursor position (convert memory address to screen position)
     mov eax, [cursor_pos]
-    sub eax, 0xB8000     ; Subtract video memory base
-    shr eax, 1           ; Divide by 2 (each char is 2 bytes)
-    
-    ; EAX now contains the cursor position (0-1999 for 80x25)
-    mov ebx, eax         ; Save position
-    
-    ; Set low byte of cursor position
-    mov dx, 0x3D4        ; VGA CRTC index register
-    mov al, 0x0F         ; Cursor Location Low register
+    sub eax, 0xB8000
+    shr eax, 1
+    mov ebx, eax
+    mov dx, 0x3D4
+    mov al, 0x0F
     out dx, al
-    
-    mov dx, 0x3D5        ; VGA CRTC data register
-    mov al, bl           ; Low byte of cursor position
+    mov dx, 0x3D5
+    mov al, bl
     out dx, al
-    
-    ; Set high byte of cursor position
-    mov dx, 0x3D4        ; VGA CRTC index register
-    mov al, 0x0E         ; Cursor Location High register
+    mov dx, 0x3D4
+    mov al, 0x0E
     out dx, al
-    
-    mov dx, 0x3D5        ; VGA CRTC data register
-    mov al, bh           ; High byte of cursor position
+    mov dx, 0x3D5
+    mov al, bh
     out dx, al
-    
     pop edx
     pop ebx
     pop eax
     ret
 
-; Enable cursor with specific shape (optional - call this in kernel_start if needed)
-enable_cursor:
-    push eax
-    push edx
-    
-    ; Set cursor start line (top of cursor)
-    mov dx, 0x3D4
-    mov al, 0x0A         ; Cursor Start Register
-    out dx, al
-    
-    mov dx, 0x3D5
-    mov al, 0x0E         ; Start at line 14 (for underscore cursor)
-    out dx, al
-    
-    ; Set cursor end line (bottom of cursor)
-    mov dx, 0x3D4
-    mov al, 0x0B         ; Cursor End Register
-    out dx, al
-    
-    mov dx, 0x3D5
-    mov al, 0x0F         ; End at line 15 (for underscore cursor)
-    out dx, al
-    
-    pop edx
-    pop eax
-    ret
-
-; Create an info display function
 display_info:
-    mov edi, 0xB8F00      ; Move to a different position at bottom
+    mov edi, 0xB8F00
     mov esi, os_name
     call print_string_at
     ret
 
-; Prints null-terminated string at EDI position
-; ESI = pointer to string
-; EDI = screen memory position
 print_string_at:
     mov al, [esi]
     cmp al, 0
     je .done
-    
     mov [edi], al
     mov byte [edi + 1], 0x0F
     inc esi
     add edi, 2
     jmp print_string_at
-
 .done:
     ret
 
 wait_for_key:
-    in al, 0x64          ; Read keyboard controller status
-    test al, 0x01        ; Check if output buffer is full
-    jz wait_for_key      ; If not, keep waiting
-    in al, 0x60          ; Read scancode
-    
-    cmp al, 0x2A         ; Left Shift press
+    in al, 0x64
+    test al, 0x01
+    jz wait_for_key
+    in al, 0x60
+    cmp al, 0x2A
     je shift_press
-    cmp al, 0x36         ; Right Shift press
+    cmp al, 0x36
     je shift_press
-    cmp al, 0xAA         ; Left Shift release
+    cmp al, 0xAA
     je shift_release
-    cmp al, 0xB6         ; Right Shift release
+    cmp al, 0xB6
     je shift_release
-    
-    cmp al, 0x80         ; If it's a key release
-    jae wait_for_key     ; Ignore key releases
-    
-    ; Check for backspace
+    cmp al, 0x80
+    jae wait_for_key
     cmp al, 0x0E
     je handle_backspace
-    
-    ; Check for Enter
     cmp al, 0x1C
     je handle_enter
-    
-    ; Normal character lookup
     movzx ebx, al
     mov al, [shift_pressed]
     test al, al
@@ -191,91 +155,163 @@ wait_for_key:
 .no_shift:
     mov al, [scancode_to_ascii + ebx]
 .check_char:
-    test al, al          ; Check if we got a valid character
-    jz wait_for_key      ; If not, keep waiting
+    test al, al
+    jz wait_for_key
     ret
-
 .shift_press:
     mov byte [shift_pressed], 1
     jmp wait_for_key
-
 .shift_release:
     mov byte [shift_pressed], 0
     jmp wait_for_key
     
 handle_enter:
-    ; Null-terminate the buffer BEFORE comparison
     mov ebx, [buffer_index]
     mov byte [input_buffer + ebx], 0
-    
-    ; Move cursor to new line
     call newline
     
-    ; Compare with "help" command
+    ; Check filesystem commands
+    mov esi, input_buffer
+    mov edi, mkfs_cmd
+    call compare_strings
+    cmp eax, 0
+    je cmd_mkfs
+    
+    mov esi, input_buffer
+    mov edi, ls_cmd
+    call compare_strings
+    cmp eax, 0
+    je cmd_ls
+    
+    ; Check touch with args
+    mov esi, input_buffer
+    mov edi, touch_cmd
+    mov ecx, 5
+.check_touch:
+    mov al, [esi]
+    mov bl, [edi]
+    cmp al, bl
+    jne .not_touch
+    inc esi
+    inc edi
+    loop .check_touch
+    mov al, [esi]
+    cmp al, 0
+    je cmd_touch
+    cmp al, ' '
+    je cmd_touch
+    
+.not_touch:
+    ; Check rm with args
+    mov esi, input_buffer
+    mov edi, rm_cmd
+    mov ecx, 2
+.check_rm:
+    mov al, [esi]
+    mov bl, [edi]
+    cmp al, bl
+    jne .not_rm
+    inc esi
+    inc edi
+    loop .check_rm
+    mov al, [esi]
+    cmp al, 0
+    je cmd_rm
+    cmp al, ' '
+    je cmd_rm
+    
+.not_rm:
+    ; Check cat with args
+    mov esi, input_buffer
+    mov edi, cat_cmd
+    mov ecx, 3
+.check_cat:
+    mov al, [esi]
+    mov bl, [edi]
+    cmp al, bl
+    jne .not_cat_cmd
+    inc esi
+    inc edi
+    loop .check_cat
+    mov al, [esi]
+    cmp al, 0
+    je cmd_cat
+    cmp al, ' '
+    je cmd_cat
+    
+.not_cat_cmd:
+    ; Check write with args
+    mov esi, input_buffer
+    mov edi, write_cmd
+    mov ecx, 5
+.check_write:
+    mov al, [esi]
+    mov bl, [edi]
+    cmp al, bl
+    jne .not_write
+    inc esi
+    inc edi
+    loop .check_write
+    mov al, [esi]
+    cmp al, 0
+    je cmd_write
+    cmp al, ' '
+    je cmd_write
+    
+.not_write:
+    ; Original commands
     mov esi, input_buffer
     mov edi, help_cmd
     call compare_strings
     cmp eax, 0
     je cmd_help
     
-    ; Compare with "clear" command
     mov esi, input_buffer
     mov edi, clear_cmd
     call compare_strings
     cmp eax, 0
     je cmd_clear
     
-    ; Compare with "about" command
     mov esi, input_buffer
     mov edi, about_cmd
     call compare_strings
     cmp eax, 0
     je cmd_about
     
-    ; Compare with "casc" command
     mov esi, input_buffer
     mov edi, casc_cmd
     call compare_strings
     cmp eax, 0
     je cmd_casc
 
-    ; Check if command is "echo"
+    ; Check echo
     mov esi, input_buffer
     mov edi, echo_cmd
-    mov ecx, 4              ; Length of "echo" (without space)
+    mov ecx, 4
 .check_echo:
     mov al, [esi]
     mov bl, [edi]
     cmp al, bl
-    jne .not_echo          ; Not "echo", continue to next command
+    jne .not_echo
     inc esi
     inc edi
     loop .check_echo
-    
-    ; Check if it's just "echo" or "echo " (space or null after)
     mov al, [esi]
-    cmp al, 0              ; Is it end of string?
-    je cmd_echo            ; Yes, jump to echo command
-    cmp al, ' '           ; Is it a space?
-    je cmd_echo            ; Yes, jump to echo command
-    jmp .not_echo         ; No, must be something else
+    cmp al, 0
+    je cmd_echo
+    cmp al, ' '
+    je cmd_echo
     
 .not_echo:
-    ; Compare with "specs" command
     mov esi, input_buffer
     mov edi, specs_cmd
     call compare_strings
     cmp eax, 0
     je cmd_specs
     
-    ; Compare with "about" command
-    mov esi, input_buffer
-    
-    ; Unknown command - only show if buffer has more than prompt
     mov ebx, [buffer_index]
-    cmp ebx, 2              ; Check if there's anything after prompt
-    jle .skip_unknown       ; Skip if only prompt or less
-    
+    cmp ebx, 2
+    jle .skip_unknown
     mov esi, msg_unknown
     mov edi, [cursor_pos]
     call print_string_at
@@ -283,105 +319,560 @@ handle_enter:
     
 .skip_unknown:
     call clear_input_buffer
-    xor al, al          ; Return 0 to indicate key was processed
+    xor al, al
     ret
 
-; Define system info structure address
+; Filesystem commands
+cmd_mkfs:
+    mov esi, fs_creating_msg
+    mov edi, [cursor_pos]
+    call print_string_at
+    call newline
+    mov edi, FS_BUFFER
+    mov dword [edi + Superblock.magic], 0x4E4F5653
+    mov dword [edi + Superblock.totalBlocks], 446
+    mov dword [edi + Superblock.freeBlocks], 446
+    mov edi, FAT_BUFFER
+    mov ecx, 512
+    mov ax, 0xFFFF
+.clear_fat:
+    mov [edi], ax
+    add edi, 2
+    loop .clear_fat
+    mov edi, DIR_BUFFER
+    mov ecx, (FS_MAX_FILES * 32) / 4
+    xor eax, eax
+.clear_dir:
+    mov [edi], eax
+    add edi, 4
+    loop .clear_dir
+    mov byte [fs_initialized], 1
+    mov esi, fs_created_msg
+    mov edi, [cursor_pos]
+    call print_string_at
+    call newline
+    call clear_input_buffer
+    xor al, al
+    ret
+
+cmd_ls:
+    cmp byte [fs_initialized], 0
+    je .not_init
+    mov esi, DIR_BUFFER
+    xor ecx, ecx
+.check_entry:
+    cmp ecx, FS_MAX_FILES
+    jge .done
+    mov al, [esi + DirEntry.flags]
+    test al, 0x01
+    jz .next_entry
+    push esi
+    push ecx
+    mov edi, [cursor_pos]
+    call print_string_at
+    mov [cursor_pos], edi
+    mov edi, [cursor_pos]
+    push esi
+    mov esi, size_msg
+    call print_string_at
+    pop esi
+    mov [cursor_pos], edi
+    pop ecx
+    pop esi
+    push esi
+    push ecx
+    mov eax, [esi + DirEntry.size]
+    call print_number
+    mov edi, [cursor_pos]
+    push esi
+    mov esi, bytes_msg
+    call print_string_at
+    pop esi
+    mov [cursor_pos], edi
+    call newline
+    pop ecx
+    pop esi
+.next_entry:
+    add esi, 32
+    inc ecx
+    jmp .check_entry
+.done:
+    call clear_input_buffer
+    xor al, al
+    ret
+.not_init:
+    mov esi, fs_not_init_msg
+    mov edi, [cursor_pos]
+    call print_string_at
+    call newline
+    call clear_input_buffer
+    xor al, al
+    ret
+
+cmd_touch:
+    cmp byte [fs_initialized], 0
+    je .not_init
+    mov esi, input_buffer
+    add esi, 6
+    mov al, [esi]
+    test al, al
+    jz .no_filename
+    call fs_create_file
+    test eax, eax
+    jz .created
+    mov esi, fs_error_msg
+    mov edi, [cursor_pos]
+    call print_string_at
+    call newline
+    jmp .done
+.created:
+    mov esi, file_created_msg
+    mov edi, [cursor_pos]
+    call print_string_at
+    call newline
+    jmp .done
+.no_filename:
+    mov esi, no_filename_msg
+    mov edi, [cursor_pos]
+    call print_string_at
+    call newline
+    jmp .done
+.not_init:
+    mov esi, fs_not_init_msg
+    mov edi, [cursor_pos]
+    call print_string_at
+    call newline
+.done:
+    call clear_input_buffer
+    xor al, al
+    ret
+
+cmd_write:
+    cmp byte [fs_initialized], 0
+    je .not_init
+    mov esi, input_buffer
+    add esi, 6
+    mov edi, esi
+.find_space:
+    mov al, [edi]
+    test al, al
+    jz .no_text
+    cmp al, ' '
+    je .found_space
+    inc edi
+    jmp .find_space
+.found_space:
+    mov byte [edi], 0
+    inc edi
+    push edi
+    call fs_find_file
+    pop edi
+    test eax, eax
+    jnz .not_found
+    push ecx
+    mov esi, edi
+    call strlen
+    mov edx, eax
+    pop ecx
+    mov esi, edi
+    call fs_write_file
+    mov esi, file_written_msg
+    mov edi, [cursor_pos]
+    call print_string_at
+    call newline
+    jmp .done
+.not_found:
+    mov esi, file_not_found_msg
+    mov edi, [cursor_pos]
+    call print_string_at
+    call newline
+    jmp .done
+.no_text:
+    mov esi, no_text_msg
+    mov edi, [cursor_pos]
+    call print_string_at
+    call newline
+    jmp .done
+.not_init:
+    mov esi, fs_not_init_msg
+    mov edi, [cursor_pos]
+    call print_string_at
+    call newline
+.done:
+    call clear_input_buffer
+    xor al, al
+    ret
+
+cmd_cat:
+    cmp byte [fs_initialized], 0
+    je .not_init
+    mov esi, input_buffer
+    add esi, 4
+    mov al, [esi]
+    test al, al
+    jz .no_filename
+    call fs_find_file
+    test eax, eax
+    jnz .not_found
+    mov eax, [ecx + DirEntry.size]
+    test eax, eax
+    jz .empty
+    call fs_read_file
+    mov esi, FS_BUFFER
+    mov edi, [cursor_pos]
+.display_loop:
+    mov al, [esi]
+    test al, al
+    jz .display_done
+    mov [edi], al
+    mov byte [edi+1], 0x07
+    add edi, 2
+    inc esi
+    cmp al, 10
+    je .newline_char
+    jmp .continue
+.newline_char:
+    mov [cursor_pos], edi
+    call newline
+    mov edi, [cursor_pos]
+    jmp .display_loop
+.continue:
+    jmp .display_loop
+.display_done:
+    mov [cursor_pos], edi
+    call newline
+    jmp .done
+.empty:
+    mov esi, file_empty_msg
+    mov edi, [cursor_pos]
+    call print_string_at
+    call newline
+    jmp .done
+.not_found:
+    mov esi, file_not_found_msg
+    mov edi, [cursor_pos]
+    call print_string_at
+    call newline
+    jmp .done
+.no_filename:
+    mov esi, no_filename_msg
+    mov edi, [cursor_pos]
+    call print_string_at
+    call newline
+    jmp .done
+.not_init:
+    mov esi, fs_not_init_msg
+    mov edi, [cursor_pos]
+    call print_string_at
+    call newline
+.done:
+    call clear_input_buffer
+    xor al, al
+    ret
+
+cmd_rm:
+    cmp byte [fs_initialized], 0
+    je .not_init
+    mov esi, input_buffer
+    add esi, 3
+    mov al, [esi]
+    test al, al
+    jz .no_filename
+    call fs_delete_file
+    test eax, eax
+    jz .deleted
+    mov esi, file_not_found_msg
+    mov edi, [cursor_pos]
+    call print_string_at
+    call newline
+    jmp .done
+.deleted:
+    mov esi, file_deleted_msg
+    mov edi, [cursor_pos]
+    call print_string_at
+    call newline
+    jmp .done
+.no_filename:
+    mov esi, no_filename_msg
+    mov edi, [cursor_pos]
+    call print_string_at
+    call newline
+    jmp .done
+.not_init:
+    mov esi, fs_not_init_msg
+    mov edi, [cursor_pos]
+    call print_string_at
+    call newline
+.done:
+    call clear_input_buffer
+    xor al, al
+    ret
+
+; Filesystem helper functions
+fs_create_file:
+    push ebx
+    push ecx
+    push edi
+    mov edi, DIR_BUFFER
+    xor ecx, ecx
+.find_free:
+    cmp ecx, FS_MAX_FILES
+    jge .no_space
+    mov al, [edi + DirEntry.flags]
+    test al, 0x01
+    jz .found_free
+    add edi, 32
+    inc ecx
+    jmp .find_free
+.found_free:
+    push edi
+    mov ecx, 16
+.copy_name:
+    mov al, [esi]
+    mov [edi], al
+    test al, al
+    jz .name_done
+    inc esi
+    inc edi
+    loop .copy_name
+.name_done:
+    pop edi
+    mov dword [edi + DirEntry.size], 0
+    mov word [edi + DirEntry.firstBlock], 0xFFFF
+    mov byte [edi + DirEntry.flags], 0x01
+    xor eax, eax
+    jmp .done
+.no_space:
+    mov eax, 1
+.done:
+    pop edi
+    pop ecx
+    pop ebx
+    ret
+
+fs_find_file:
+    push ebx
+    push edx
+    push edi
+    mov edi, DIR_BUFFER
+    xor ecx, ecx
+.search:
+    cmp ecx, FS_MAX_FILES
+    jge .not_found
+    mov al, [edi + DirEntry.flags]
+    test al, 0x01
+    jz .next
+    push esi
+    push edi
+    mov edx, 16
+.cmp_loop:
+    mov al, [esi]
+    mov bl, [edi]
+    cmp al, bl
+    jne .name_diff
+    test al, al
+    jz .name_match
+    inc esi
+    inc edi
+    dec edx
+    jnz .cmp_loop
+.name_match:
+    pop edi
+    pop esi
+    mov ecx, edi
+    xor eax, eax
+    jmp .done
+.name_diff:
+    pop edi
+    pop esi
+.next:
+    add edi, 32
+    inc ecx
+    jmp .search
+.not_found:
+    mov eax, 1
+.done:
+    pop edi
+    pop edx
+    pop ebx
+    ret
+
+fs_write_file:
+    push eax
+    push ebx
+    push edi
+    mov ax, [ecx + DirEntry.firstBlock]
+    cmp ax, 0xFFFF
+    jne .has_block
+    call fs_alloc_block
+    mov [ecx + DirEntry.firstBlock], ax
+.has_block:
+    mov edi, FS_BUFFER
+    push ecx
+    mov ecx, edx
+    rep movsb
+    mov byte [edi], 0
+    pop ecx
+    mov [ecx + DirEntry.size], edx
+    pop edi
+    pop ebx
+    pop eax
+    ret
+
+fs_read_file:
+    push eax
+    push esi
+    push edi
+    push ecx
+    pop ecx
+    pop edi
+    pop esi
+    pop eax
+    ret
+
+fs_delete_file:
+    call fs_find_file
+    test eax, eax
+    jnz .not_found
+    mov byte [ecx + DirEntry.flags], 0
+    mov word [ecx + DirEntry.firstBlock], 0xFFFF
+    xor eax, eax
+    ret
+.not_found:
+    mov eax, 1
+    ret
+
+fs_alloc_block:
+    push ebx
+    push edi
+    mov edi, FAT_BUFFER
+    xor ebx, ebx
+.find_free:
+    mov ax, [edi]
+    cmp ax, 0xFFFF
+    je .found
+    add edi, 2
+    inc ebx
+    cmp ebx, 512
+    jl .find_free
+    mov ax, 0xFFFF
+    jmp .done
+.found:
+    mov word [edi], 0xFFFE
+    mov ax, bx
+.done:
+    pop edi
+    pop ebx
+    ret
+
+strlen:
+    push esi
+    xor eax, eax
+.loop:
+    mov bl, [esi]
+    test bl, bl
+    jz .done
+    inc esi
+    inc eax
+    jmp .loop
+.done:
+    pop esi
+    ret
+
+print_number:
+    push eax
+    push ebx
+    push ecx
+    push edx
+    mov ebx, 10
+    xor ecx, ecx
+.convert:
+    xor edx, edx
+    div ebx
+    push dx
+    inc ecx
+    test eax, eax
+    jnz .convert
+    mov edi, [cursor_pos]
+.print:
+    pop ax
+    add al, '0'
+    mov [edi], al
+    mov byte [edi+1], 0x07
+    add edi, 2
+    loop .print
+    mov [cursor_pos], edi
+    pop edx
+    pop ecx
+    pop ebx
+    pop eax
+    ret
+
+; Original commands
 SYSINFO_ADDR equ 0x500
 
 cmd_specs:
-    ; Get CPU info using CPUID
-    mov eax, 0          ; Get vendor ID
+    mov eax, 0
     cpuid
-    
-    ; Print CPU vendor
     mov edi, [cursor_pos]
     mov esi, cpu_msg
     call print_string_at
-    
-    ; Store and print vendor string (12 chars: 4 from each register)
-    push eax            ; Save EAX
-    
-    ; Print first part (from EBX)
+    push eax
     mov eax, ebx
     call print_cpu_chars
-    
-    ; Print middle part (from EDX)
     mov eax, edx
     call print_cpu_chars
-    
-    ; Print last part (from ECX)
     mov eax, ecx
     call print_cpu_chars
-    
-    pop eax             ; Restore EAX
+    pop eax
     call newline
-    
-    ; Define system info structure address
-    SYSINFO_ADDR equ 0x500
-    
-    ; Verify system info structure
-    mov esi, SYSINFO_ADDR     ; System info structure location
+    mov esi, SYSINFO_ADDR
     mov edi, sysinfo_sig
-    mov ecx, 8                ; Length of signature + null
+    mov ecx, 8
     call compare_strings
     cmp eax, 0
     jne .no_sysinfo
-    
-    ; Print RAM size
     mov edi, [cursor_pos]
     mov esi, ram_msg
     call print_string_at
-    
-    ; Convert RAM size to string
-    mov ax, [SYSINFO_ADDR + 7] ; Load RAM size from structure
-    mov cx, 0                  ; Digit counter
-    mov bx, 10                 ; Divisor
+    mov ax, [SYSINFO_ADDR + 7]
+    mov cx, 0
+    mov bx, 10
 .convert_loop:
-    xor dx, dx              ; Clear for division
+    xor dx, dx
     div bx
-    push dx                 ; Save remainder
+    push dx
     inc cx
     test ax, ax
     jnz .convert_loop
-    
 .print_digits:
     pop ax
-    add al, '0'            ; Convert to ASCII
+    add al, '0'
     mov [edi], al
     mov byte [edi+1], 0x07
     add edi, 2
     loop .print_digits
-    
-    ; Print KB
     mov esi, kb_msg
     call print_string_at
     call newline
-    
-    ; Print BIOS vendor
     mov edi, [cursor_pos]
     mov esi, bios_msg
     call print_string_at
-    mov esi, SYSINFO_ADDR + 9    ; Point to BIOS vendor in structure
+    mov esi, SYSINFO_ADDR + 9
     call print_string_at
     call newline
-    
-    ; Print BIOS date
     mov edi, [cursor_pos]
     mov esi, bios_date_msg
     call print_string_at
-    mov esi, SYSINFO_ADDR + 26   ; Point to BIOS date in structure
+    mov esi, SYSINFO_ADDR + 26
     call print_string_at
     call newline
     jmp .done
-    
 .no_sysinfo:
-    ; Print error message if system info not found
     mov edi, [cursor_pos]
     mov esi, sysinfo_error
     call print_string_at
     call newline
-    
 .done:
     mov [cursor_pos], edi
     call clear_input_buffer
@@ -389,59 +880,30 @@ cmd_specs:
     call newline
     ret
 
-; Helper function to print hex string
-print_hex_string:
-    push ecx
-    mov ecx, 4         ; 4 bytes
-.hex_loop:
-    rol eax, 8         ; Get next byte
-    push eax
-    and al, 0xFF
-    cmp al, ' '        ; Check if printable
-    jb .skip
+cmd_echo:
+    mov esi, input_buffer
+    add esi, 5
+    mov al, [esi]
+    test al, al
+    jz .echo_no_args
+    mov edi, [cursor_pos]
+.echo_loop:
+    mov al, [esi]
+    test al, al
+    jz .echo_done
     mov [edi], al
     mov byte [edi+1], 0x07
     add edi, 2
-.skip:
-    pop eax
-    loop .hex_loop
-    pop ecx
-    ret
-
-cmd_echo:
-    ; Skip past "echo "
-    mov esi, input_buffer
-    add esi, 5          ; Skip past "echo" + space
-    
-    ; Check if there's anything after "echo "
-    mov al, [esi]
-    test al, al
-    jz .echo_no_args    ; If nothing after "echo ", just return
-    
-    ; Print the rest of the string
-    mov edi, [cursor_pos]
-    
-.echo_loop:
-    mov al, [esi]       ; Get character from input
-    test al, al         ; Check for null terminator
-    jz .echo_done
-    
-    mov [edi], al       ; Write character
-    mov byte [edi+1], 0x07  ; Gray color
-    add edi, 2          ; Move to next screen position
-    inc esi             ; Move to next input character
+    inc esi
     jmp .echo_loop
-    
 .echo_done:
     mov [cursor_pos], edi
     call newline
-    
 .echo_no_args:
     call clear_input_buffer
     xor al, al
     ret
 
-; ==== Command Handlers ====
 cmd_help:
     mov esi, msg_help
     mov edi, [cursor_pos]
@@ -456,6 +918,7 @@ cmd_clear:
     call clear_input_buffer
     xor al, al
     ret
+
 cmd_casc:
     mov esi, msg_casc
     mov edi, [cursor_pos]
@@ -464,6 +927,7 @@ cmd_casc:
     call clear_input_buffer
     xor al, al
     ret
+
 cmd_about:
     mov esi, msg_about
     mov edi, [cursor_pos]
@@ -473,7 +937,6 @@ cmd_about:
     xor al, al
     ret
 
-; Back to wait_for_key handlers
 shift_press:
     mov byte [shift_pressed], 1
     jmp wait_for_key
@@ -484,196 +947,174 @@ shift_release:
 
 handle_backspace:
     mov edi, [cursor_pos]
-    sub edi, 2              ; Position we'd backspace to
-    
-    ; Calculate column position
+    sub edi, 2
     mov eax, edi
-    sub eax, 0xB8000       ; Get offset from start of video memory
-    mov ecx, 160           ; Bytes per line (80 columns * 2 bytes per char)
+    sub eax, 0xB8000
+    mov ecx, 160
     xor edx, edx
-    div ecx                ; EDX now contains byte offset within line
-    
-    ; Don't backspace if we're at prompt position (first 2 bytes of line)
-    cmp edx, 2             ; Smiley + space (4 bytes total, but we're checking position after backspace)
-    jle .backspace_done    ; If at or before prompt, don't backspace
-    
-    ; Safe to backspace
-    mov dword [cursor_pos], edi  ; Update cursor position
-    mov byte [edi], ' '          ; Write space
-    mov byte [edi+1], 0x07       ; Write color
-    
-    ; Remove from buffer
+    div ecx
+    cmp edx, 2
+    jle .backspace_done
+    mov dword [cursor_pos], edi
+    mov byte [edi], ' '
+    mov byte [edi+1], 0x07
     mov ebx, [buffer_index]
     test ebx, ebx
     jz .backspace_done
     dec dword [buffer_index]
-    
-    call update_hardware_cursor  ; Update cursor after backspace
-    
+    call update_hardware_cursor
 .backspace_done:
-    xor al, al              ; Return 0 to indicate key was processed
+    xor al, al
     ret
 
 newline:
-    ; Calculate current line
     mov eax, [cursor_pos]
     sub eax, 0xB8000
     mov ecx, 160
     xor edx, edx
-    div ecx             ; EAX = line number, EDX = column offset
-    
-    ; Move to start of next line
-    inc eax             ; Next line
-    mul ecx             ; EAX = byte offset of next line
+    div ecx
+    inc eax
+    mul ecx
     add eax, 0xB8000
-    
-    ; Check if we need to wrap
-    cmp eax, 0xB8FA0    ; End of screen
+    cmp eax, 0xB8FA0
     jl .no_wrap
-    mov eax, 0xB81E0    ; Reset to line 3
-    
+    mov eax, 0xB81E0
 .no_wrap:
     mov [cursor_pos], eax
     call show_prompt
-    call update_hardware_cursor  ; Update cursor after newline
+    call update_hardware_cursor
     ret
 
 clear_screen:
     mov edi, 0xB8000
-    mov ecx, 2000       ; 80x25 characters
+    mov ecx, 2000
 .clear_loop:
     mov byte [edi], ' '
     mov byte [edi+1], 0x07
     add edi, 2
     loop .clear_loop
-    
-    ; Reset cursor to top after clear
     mov dword [cursor_pos], 0xB8000
-    call display_info   ; Redraw info
-    mov dword [cursor_pos], 0xB81E0  ; Reset to line 3
+    call display_info
+    mov dword [cursor_pos], 0xB81E0
     call show_prompt
-    call update_hardware_cursor  ; Update cursor after clear
+    call update_hardware_cursor
     ret
 
 clear_input_buffer:
-    ; Clear buffer
     mov edi, input_buffer
     mov ecx, 64
     xor eax, eax
     rep stosb
-    
-    ; Reset index
     mov dword [buffer_index], 0
     ret
 
-; Initialize keyboard controller
-init_keyboard:
-    ; Wait for keyboard buffer to be empty
-    call wait_kbd_empty
-    
-    ; Disable both PS/2 ports
-    mov al, 0xAD
-    out 0x64, al
-    call wait_kbd_empty
-    mov al, 0xA7
-    out 0x64, al
-    call wait_kbd_empty
-    
-    ; Flush output buffer (read until empty)
-.flush_loop:
-    in al, 0x64
-    test al, 1
-    jz .flush_done
-    in al, 0x60
-    jmp .flush_loop
-.flush_done:
-
-    ; Set command byte
-    mov al, 0x20          ; Read command byte
-    out 0x64, al
-    call wait_kbd_read
-    in al, 0x60
-    push ax
-    
-    ; Write new command byte
-    mov al, 0x60          ; Write command byte
-    out 0x64, al
-    call wait_kbd_empty
-    pop ax
-    and al, 0x10          ; Keep translation
-    or al, 0x47           ; Enable port 1, interrupts, translation
-    out 0x60, al
-    call wait_kbd_empty
-    
-    ; Enable first PS/2 port
-    mov al, 0xAE
-    out 0x64, al
-    call wait_kbd_empty
-    
-    ; Reset keyboard and wait for ACK
-    mov al, 0xFF
-    out 0x60, al
-.wait_ack:
-    call wait_kbd_read
-    in al, 0x60
-    cmp al, 0xFA          ; Check for ACK
-    jne .wait_ack
-    
-    ; Enable scanning
-    mov al, 0xF4
-    out 0x60, al
-.wait_final_ack:
-    call wait_kbd_read
-    in al, 0x60
-    cmp al, 0xFA          ; Check for ACK
-    jne .wait_final_ack
-    
-    ret
-
-; Wait for keyboard controller buffer to be empty
-wait_kbd_empty:
-    in al, 0x64
-    test al, 2
-    jnz wait_kbd_empty
-    ret
-
-; Wait for keyboard controller output
-wait_kbd_read:
-    in al, 0x64
-    test al, 1
-    jz wait_kbd_read
-    ret
-; Function to print 4 characters from EAX (for CPU vendor string)
 print_cpu_chars:
     push ecx
     push edi
-    mov ecx, 4          ; Process 4 characters
+    mov ecx, 4
 .loop:
     mov edi, [cursor_pos]
-    mov [edi], al       ; Write character
-    mov byte [edi+1], 0x07  ; Gray color
+    mov [edi], al
+    mov byte [edi+1], 0x07
     add dword [cursor_pos], 2
-    ror eax, 8         ; Get next character
+    ror eax, 8
     loop .loop
     pop edi
     pop ecx
     ret
 
-shift_pressed db 0     ; Track shift key state
+print_string32_rainbow:
+    pushad
+    mov ebx, rainbow_colors
+    xor ecx, ecx
+.loop:
+    mov al, [esi]
+    test al, al
+    je .done
+    and al, 0x7F
+    mov [edi], al
+    mov dl, [ebx + ecx]
+    mov [edi+1], dl
+    add edi, 2
+    inc esi
+    inc ecx
+    cmp ecx, rainbow_count
+    jl .no_wrap
+    xor ecx, ecx
+.no_wrap:
+    jmp .loop
+.done:
+    popad
+    ret
+
+show_prompt:
+    push edi
+    mov edi, [cursor_pos]
+    mov byte [edi], '>'
+    mov byte [edi+1], 0x02
+    mov byte [edi+2], ':'
+    mov byte [edi+3], 0x07
+    mov byte [edi+4], ' '
+    mov byte [edi+5], 0x07
+    add dword [cursor_pos], 4
+    pop edi
+    ret
+
+; Data section
+shift_pressed db 0
+os_name db 'This kernel is under the MIT license.', 0
+help_cmd db 'help', 0
+clear_cmd db 'clear', 0
+about_cmd db 'about', 0
+echo_cmd db 'echo', 0
+specs_cmd db 'specs', 0
+casc_cmd db 'casc', 0
+mkfs_cmd db 'mkfs', 0
+ls_cmd db 'ls', 0
+touch_cmd db 'touch', 0
+rm_cmd db 'rm', 0
+cat_cmd db 'cat', 0
+write_cmd db 'write', 0
+cpu_msg db 'CPU: ', 0
+ram_msg db 'RAM: ', 0
+kb_msg db ' KB', 0
+bios_msg db 'BIOS: ', 0
+bios_date_msg db 'BIOS Date: ', 0
+sysinfo_sig db 'SYSINFO', 0
+sysinfo_error db 'System information not available', 0
+msg_help db 'Commands: help, clear, about, echo, specs, mkfs, ls, touch, write, cat, rm', 0
+msg_about db 'novusOS Kernel (popcorn) v0.2 with Filesystem (C) Aden Kirk, 2025', 0
+msg_unknown db 'Unknown command. Type help for available commands.', 0
+msg_casc db 'CASCOS is REAL :)', 0
+fs_creating_msg db 'Creating filesystem...', 0
+fs_created_msg db 'Filesystem created successfully!', 0
+fs_not_init_msg db 'Filesystem not initialized. Run mkfs first.', 0
+fs_error_msg db 'Filesystem error occurred.', 0
+file_created_msg db 'File created.', 0
+file_deleted_msg db 'File deleted.', 0
+file_written_msg db 'Data written to file.', 0
+file_not_found_msg db 'File not found.', 0
+file_empty_msg db '(empty file)', 0
+no_filename_msg db 'No filename specified.', 0
+no_text_msg db 'Usage: write filename text', 0
+size_msg db ' (', 0
+bytes_msg db ' bytes)', 0
+rainbow_colors db 0x04, 0x0E, 0x0A, 0x0B, 0x0D
+rainbow_count equ ($ - rainbow_colors)
 
 scancode_to_ascii:
     times 0x02 db 0
-    db '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '='  ; 0x02-0x0D
+    db '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '='
     times 0x10-0x0E db 0
-    db 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']'  ; 0x10-0x1B
-    db 0  ; Enter (0x1C)
-    db 0  ; Left Ctrl (0x1D)
-    db 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', "'", '`'  ; 0x1E-0x29
-    db 0  ; Left Shift (0x2A)
-    db '\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/'       ; 0x2B-0x35
+    db 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']'
+    db 0
+    db 0
+    db 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', 0x27, '`'
+    db 0
+    db 0x5C, 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/'
     times 0x39-0x36 db 0
-    db ' '  ; Space (0x39)
-    times 256-0x3A db 0  ; Fill rest with zeros
+    db ' '
+    times 256-0x3A db 0
 
 scancode_to_ascii_shift:
     times 0x02 db 0
@@ -688,74 +1129,5 @@ scancode_to_ascii_shift:
     times 0x39-0x36 db 0
     db ' '  ; Space (0x39)
     times 256-0x3A db 0  ; Fill rest with zeros
-; --------------------------------------------------------------------
-; print_string32_rainbow
-; IN:  ESI -> zero-terminated string
-;      EDI -> VGA text buffer position
-; OUT: prints characters with rainbow colors (forces 7-bit ASCII)
-; --------------------------------------------------------------------
-print_string32_rainbow:
-    pushad
-    mov ebx, rainbow_colors
-    xor ecx, ecx                ; color index = 0
 
-.loop:
-    mov al, [esi]               ; load byte from string
-    test al, al
-    je .done
-
-    and al, 0x7F                ; <-- FIX: ensure ASCII (strip high bit)
-    mov [edi], al               ; write char to VGA
-    mov dl, [ebx + ecx]         ; pick color attribute
-    mov [edi+1], dl             ; write attribute
-
-    add edi, 2                  ; next cell
-    inc esi
-    inc ecx
-    cmp ecx, rainbow_count
-    jl .no_wrap
-    xor ecx, ecx                ; wrap colors
-.no_wrap:
-    jmp .loop
-
-.done:
-    popad
-    ret
-    
-; Data section
-os_name db 'This kernel is under the MIT license.', 0
-help_cmd db 'help', 0
-clear_cmd db 'clear', 0
-about_cmd db 'about', 0
-echo_cmd db 'echo', 0     ; Note: no space included
-specs_cmd db 'specs', 0
-casc_cmd db 'casc', 0
-
-; System information strings
-cpu_msg db 'CPU: ', 0
-ram_msg db 'RAM: ', 0
-kb_msg db ' KB', 0
-bios_msg db 'BIOS: ', 0
-bios_date_msg db 'BIOS Date: ', 0
-sysinfo_sig db 'SYSINFO', 0
-sysinfo_error db 'System information not available', 0
-msg_help db 'Available commands: help, clear, about, echo, specs', 0
-msg_about db 'novusOS Kernel (popcorn) v0.1 (C) Aden Kirk, 2025', 0
-msg_unknown db 'Unknown command. Type help for available commands.', 0
-msg_casc db 'CASCOS is REAL :)', 0
-
-rainbow_colors db 0x04, 0x0E, 0x0A, 0x0B, 0x0D
-rainbow_count  equ ($ - rainbow_colors)
-
-; Function to display the prompt
-show_prompt:
-    push edi
-    mov edi, [cursor_pos]
-    mov byte [edi], '>'
-    mov byte [edi+1], 0x02   ; green color
-    mov byte [edi+2], ':'    ; Space after smiley
-    mov byte [edi+3], 0x07
-    add dword [cursor_pos], 4 ; Move cursor past prompt
-    pop edi
-    ret
 dw 0xAA55

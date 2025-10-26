@@ -1,0 +1,16 @@
+FAT12 Disk Layout:
+
+Boot Sector: 0
+FAT1: 1-9
+FAT2: 10-18
+Root Directory: 19-32
+Data Area: 33+
+
+Disk organization:
+- 1.44MB Floppy format
+- 512 bytes per sector
+- 1 sector per cluster
+- 2 FATs
+- 224 root directory entries
+- 9 sectors per FAT
+- 14 root directory sectors
