@@ -1,18 +1,140 @@
 [bits 32]
 [org 0x1000]
+jmp kernel_start
+; Function to read a sector in protected mode
+; Input:
+;   EAX = LBA (Logical Block Address)
+;   EDI = destination buffer
+read_sector_pm:
+    pushad
+    
+    mov [.lba], eax
+    mov [.buffer], edi
+    
+    ; Send highest byte of LBA
+    mov edx, 0x1F6
+    shr eax, 24
+    or al, 0xE0
+    out dx, al
+    
+    ; Send sector count
+    mov edx, 0x1F2
+    mov al, 1
+    out dx, al
+    
+    ; Send more bits of LBA
+    mov eax, [.lba]
+    mov edx, 0x1F3
+    out dx, al
+    
+    mov edx, 0x1F4
+    mov eax, [.lba]
+    shr eax, 8
+    out dx, al
+    
+    mov edx, 0x1F5
+    mov eax, [.lba]
+    shr eax, 16
+    out dx, al
+    
+    ; Send read command
+    mov edx, 0x1F7
+    mov al, 0x20
+    out dx, al
+    
+.wait_ready:
+    in al, dx
+    test al, 8
+    jz .wait_ready
+    
+    ; Read the data
+    mov ecx, 256
+    mov edx, 0x1F0
+    mov edi, [.buffer]
+    rep insw
+    
+    popad
+    ret
+    
+.lba    dd 0
+.buffer dd 0
 
+; Function to write a sector in protected mode
+; Input:
+;   EAX = LBA
+;   ESI = source buffer
+write_sector_pm:
+    pushad
+    
+    mov [.lba], eax
+    mov [.buffer], esi
+    
+    ; Send highest byte of LBA
+    mov edx, 0x1F6
+    shr eax, 24
+    or al, 0xE0
+    out dx, al
+    
+    ; Send sector count
+    mov edx, 0x1F2
+    mov al, 1
+    out dx, al
+    
+    ; Send more bits of LBA
+    mov eax, [.lba]
+    mov edx, 0x1F3
+    out dx, al
+    
+    mov edx, 0x1F4
+    mov eax, [.lba]
+    shr eax, 8
+    out dx, al
+    
+    mov edx, 0x1F5
+    mov eax, [.lba]
+    shr eax, 16
+    out dx, al
+    
+    ; Send write command
+    mov edx, 0x1F7
+    mov al, 0x30
+    out dx, al
+    
+.wait_ready:
+    in al, dx
+    test al, 8
+    jz .wait_ready
+    
+    ; Write the data
+    mov ecx, 256
+    mov edx, 0x1F0
+    mov esi, [.buffer]
+    rep outsw
+    
+    ; Wait for write to complete
+    mov edx, 0x1F7
+.wait_complete:
+    in al, dx
+    test al, 0x80
+    jnz .wait_complete
+    
+    popad
+    ret
+    
+.lba    dd 0
+.buffer dd 0
 cursor_pos dd 0xB81E0
 input_buffer:
     times 64 db 0
 buffer_index dd 0
 
 ; Filesystem structures
-FS_BASE_SECTOR equ 1
-FS_FAT_SECTOR equ 2
+FS_BASE_SECTOR equ 20       ; Start after bootloader (1) + kernel (16) + safety margin (3)
+FS_FAT_SECTOR equ 21       ; Base + 1
 FS_FAT_SECTORS equ 32
-FS_DIR_SECTOR equ 34
+FS_DIR_SECTOR equ 53       ; FAT sector + FAT sectors
 FS_DIR_SECTORS equ 32
-FS_DATA_SECTOR equ 66
+FS_DATA_SECTOR equ 85       ; DIR sector + DIR sectors
 FS_MAX_FILES equ 256
 FS_BLOCK_SIZE equ 512
 
@@ -59,8 +181,44 @@ kernel_start:
     xor eax, eax
     xor ebx, ebx
     mov dword [buffer_index], 0
-    in al, 0x60
-    in al, 0x60
+    
+    ; Try to load filesystem
+    mov eax, FS_BASE_SECTOR
+    mov edi, FS_BUFFER
+    call read_sector_pm
+    
+    ; Check filesystem magic
+    mov eax, [FS_BUFFER + Superblock.magic]
+    cmp eax, 0x4E4F5653  ; "NOVS"
+    jne .no_fs
+    
+    ; Load FAT
+    mov ecx, FS_FAT_SECTORS
+    mov eax, FS_FAT_SECTOR
+    mov edi, FAT_BUFFER
+.load_fat:
+    push ecx
+    call read_sector_pm
+    inc eax
+    add edi, 512
+    pop ecx
+    loop .load_fat
+    
+    ; Load directory
+    mov ecx, FS_DIR_SECTORS
+    mov eax, FS_DIR_SECTOR
+    mov edi, DIR_BUFFER
+.load_dir:
+    push ecx
+    call read_sector_pm
+    inc eax
+    add edi, 512
+    pop ecx
+    loop .load_dir
+    
+    mov byte [fs_initialized], 1
+    
+.no_fs:
     call display_info
     call show_prompt
     call update_hardware_cursor
@@ -259,6 +417,13 @@ handle_enter:
     je cmd_write
     
 .not_write:
+    ; Check shutdown command
+    mov esi, input_buffer
+    mov edi, shutdown_cmd
+    call compare_strings
+    cmp eax, 0
+    je cmd_shutdown
+    
     ; Original commands
     mov esi, input_buffer
     mov edi, help_cmd
@@ -328,10 +493,19 @@ cmd_mkfs:
     mov edi, [cursor_pos]
     call print_string_at
     call newline
+    
+    ; Initialize superblock
     mov edi, FS_BUFFER
     mov dword [edi + Superblock.magic], 0x4E4F5653
     mov dword [edi + Superblock.totalBlocks], 446
     mov dword [edi + Superblock.freeBlocks], 446
+    
+    ; Write superblock to disk
+    mov eax, FS_BASE_SECTOR
+    mov esi, FS_BUFFER
+    call write_sector_pm
+    
+    ; Initialize FAT
     mov edi, FAT_BUFFER
     mov ecx, 512
     mov ax, 0xFFFF
@@ -339,6 +513,20 @@ cmd_mkfs:
     mov [edi], ax
     add edi, 2
     loop .clear_fat
+    
+    ; Write FAT to disk
+    mov ecx, FS_FAT_SECTORS
+    mov eax, FS_FAT_SECTOR
+    mov esi, FAT_BUFFER
+.write_fat:
+    push ecx
+    call write_sector_pm
+    inc eax
+    add esi, 512
+    pop ecx
+    loop .write_fat
+    
+    ; Initialize directory
     mov edi, DIR_BUFFER
     mov ecx, (FS_MAX_FILES * 32) / 4
     xor eax, eax
@@ -346,6 +534,19 @@ cmd_mkfs:
     mov [edi], eax
     add edi, 4
     loop .clear_dir
+    
+    ; Write directory to disk
+    mov ecx, FS_DIR_SECTORS
+    mov eax, FS_DIR_SECTOR
+    mov esi, DIR_BUFFER
+.write_dir:
+    push ecx
+    call write_sector_pm
+    inc eax
+    add esi, 512
+    pop ecx
+    loop .write_dir
+    
     mov byte [fs_initialized], 1
     mov esi, fs_created_msg
     mov edi, [cursor_pos]
@@ -707,6 +908,7 @@ fs_write_file:
     call fs_alloc_block
     mov [ecx + DirEntry.firstBlock], ax
 .has_block:
+    ; Copy data to buffer
     mov edi, FS_BUFFER
     push ecx
     mov ecx, edx
@@ -714,6 +916,24 @@ fs_write_file:
     mov byte [edi], 0
     pop ecx
     mov [ecx + DirEntry.size], edx
+    
+    ; Write data to disk
+    movzx eax, word [ecx + DirEntry.firstBlock]
+    add eax, FS_DATA_SECTOR
+    mov esi, FS_BUFFER
+    call write_sector_pm
+    
+    ; Write updated directory entry
+    push ecx
+    sub ecx, DIR_BUFFER
+    shr ecx, 5          ; Divide by 32 (size of directory entry)
+    mov eax, ecx
+    shr eax, 4          ; Divide by 16 (entries per sector)
+    add eax, FS_DIR_SECTOR
+    mov esi, DIR_BUFFER
+    call write_sector_pm
+    pop ecx
+    
     pop edi
     pop ebx
     pop eax
@@ -723,8 +943,13 @@ fs_read_file:
     push eax
     push esi
     push edi
-    push ecx
-    pop ecx
+    
+    ; Read data from disk
+    movzx eax, word [ecx + DirEntry.firstBlock]
+    add eax, FS_DATA_SECTOR
+    mov edi, FS_BUFFER
+    call read_sector_pm
+    
     pop edi
     pop esi
     pop eax
@@ -838,6 +1063,7 @@ cmd_specs:
     mov ax, [SYSINFO_ADDR + 7]
     mov cx, 0
     mov bx, 10
+    call newline
 .convert_loop:
     xor dx, dx
     div bx
@@ -936,6 +1162,23 @@ cmd_about:
     call clear_input_buffer
     xor al, al
     ret
+
+; Shutdown command - attempts ACPI shutdown, falls back to halt
+cmd_shutdown:
+    mov esi, shutdown_msg
+    mov edi, [cursor_pos]
+    call print_string_at
+    call newline
+    
+    ; Try ACPI shutdown first
+    mov dx, 0x604
+    mov ax, 0x2000
+    out dx, ax
+    
+    ; If ACPI shutdown failed, halt the CPU
+    cli             ; Disable interrupts
+    hlt            ; Halt the CPU
+    jmp $          ; Just in case an NMI wakes us
 
 shift_press:
     mov byte [shift_pressed], 1
@@ -1049,13 +1292,11 @@ print_string32_rainbow:
 
 show_prompt:
     push edi
-    mov edi, [cursor_pos]
+    mov edi, [cursor_pos] ; prints >: and puts commands typed after it
     mov byte [edi], '>'
     mov byte [edi+1], 0x02
     mov byte [edi+2], ':'
     mov byte [edi+3], 0x07
-    mov byte [edi+4], ' '
-    mov byte [edi+5], 0x07
     add dword [cursor_pos], 4
     pop edi
     ret
@@ -1075,6 +1316,7 @@ touch_cmd db 'touch', 0
 rm_cmd db 'rm', 0
 cat_cmd db 'cat', 0
 write_cmd db 'write', 0
+shutdown_cmd db 'shutdown', 0
 cpu_msg db 'CPU: ', 0
 ram_msg db 'RAM: ', 0
 kb_msg db ' KB', 0
@@ -1082,8 +1324,9 @@ bios_msg db 'BIOS: ', 0
 bios_date_msg db 'BIOS Date: ', 0
 sysinfo_sig db 'SYSINFO', 0
 sysinfo_error db 'System information not available', 0
-msg_help db 'Commands: help, clear, about, echo, specs, mkfs, ls, touch, write, cat, rm', 0
+msg_help db 'Commands: help, clear, about, echo, specs, mkfs, ls, touch, write, cat, rm, shutdown', 0
 msg_about db 'novusOS Kernel (popcorn) v0.2 with Filesystem (C) Aden Kirk, 2025', 0
+shutdown_msg db 'Shutting down...', 0
 msg_unknown db 'Unknown command. Type help for available commands.', 0
 msg_casc db 'CASCOS is REAL :)', 0
 fs_creating_msg db 'Creating filesystem...', 0
